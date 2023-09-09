@@ -1,0 +1,34 @@
+{
+  "name": "@davepagurek/shader-builder",
+  "version": "0.0.1",
+  "main": "build/shader-builder.js",
+  "author": "Dave Pagurek <dave@davepagurek.com>",
+  "license": "MIT",
+  "types": "build/shader-builder.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davepagurek/shader-builder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davepagurek/shader-builder/issues"
+  },
+  "homepage": "https://github.com/davepagurek/shader-builder",
+  "dependencies": {
+    "@shaderfrog/glsl-parser": "^2.0.0"
+  },
+  "devDependencies": {
+    "gh-pages": "^4.0.0",
+    "ts-loader": "^9.4.1",
+    "typescript": "^4.9.3",
+    "webpack": "^5.75.0",
+    "webpack-cli": "^5.0.0"
+  },
+  "scripts": {
+    "build": "yarn run webpack",
+    "deploy": "yarn build && yarn run gh-pages -d . --remove .gitignore",
+    "publish": "npm publish --access public"
+  },
+  "files": [
+    "build"
+  ]
+}
