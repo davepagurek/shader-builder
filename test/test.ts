@@ -1,6 +1,6 @@
-import { ShaderAttribute, ShaderGraph, ShaderSnippet, ShaderUniform, ShaderVarying } from '../shader-builder'
+import { ShaderAttribute, ShaderGraph, ShaderSnippet, ShaderUniform, ShaderVarying } from '../src/shader-builder'
 
-const graph = new ShaderGraph()
+const graph = new ShaderGraph({ version: 300 })
 
 const p5Inputs = {
   position: new ShaderAttribute('vec3', 'aPosition'),

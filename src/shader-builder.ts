@@ -12,6 +12,7 @@ interface ShaderGraphNode {
   declaration(ctx: ShaderContext): string
   header(ctx: ShaderContext): string
   dependsUpon(ctx: ShaderContext): ShaderGraphNode[]
+  extensions(ctx: ShaderContext): string[]
 }
 
 export class ShaderSnippet implements ShaderGraphNode {
@@ -23,11 +24,28 @@ export class ShaderSnippet implements ShaderGraphNode {
 
   outputType: string
   outputProperties: { [name: string]: string } | null
+  makeSnippet: (ctx: ShaderContext) => string
+  extensions: (ctx: ShaderContext) => string[]
 
   uses: number = 0
 
-  constructor(public snippet: string, { mainFunction: rawMainFunction }: { mainFunction?: string } = {}) {
-    this.program = parse(snippet)
+  constructor(
+    snippet: string | ((ctx?: ShaderContext) => string),
+    {
+      mainFunction: rawMainFunction,
+      extensions = () => [],
+    }: {
+      mainFunction?: string
+      extensions?: (ctx: ShaderContext) => string[]
+    } = {}
+  ) {
+    if (snippet instanceof Function) {
+      this.makeSnippet = snippet
+    } else {
+      this.makeSnippet = () => snippet
+    }
+    this.extensions = extensions
+    this.program = parse(snippet instanceof Function ? snippet() : snippet)
     this.globalScope = this.program.scopes.find((scope) => scope?.name === 'global')!
     const mainFunctionName = rawMainFunction ?? last(Object.keys(this.globalScope.functions))
     const mainFunctionSignatures = this.globalScope.functions[mainFunctionName]
@@ -73,9 +91,9 @@ export class ShaderSnippet implements ShaderGraphNode {
     return []
   }
 
-  header() {
+  header(ctx: ShaderContext) {
     // TODO: rename types
-    return this.snippet
+    return this.makeSnippet(ctx)
   }
 
   instantiate() {
@@ -120,6 +138,10 @@ export class ShaderSnippetInstance implements ShaderGraphNode {
 
   header() {
     return ''
+  }
+
+  extensions() {
+    return []
   }
 
   dependsUpon(): ShaderGraphNode[] {
@@ -205,6 +227,10 @@ export class ShaderSnippetInstanceInput extends Inputtable implements ShaderGrap
   typeName(): string {
     return this.source.snippet.inputTypes[this.property]
   }
+
+  extensions() {
+    return []
+  }
 }
 
 export class DefaultShaderOutput extends Inputtable implements ShaderGraphNode {
@@ -216,20 +242,24 @@ export class DefaultShaderOutput extends Inputtable implements ShaderGraphNode {
     return this.type
   }
 
-  reference() {
+  reference(_ctx: ShaderContext) {
     return this.name
   }
 
   declaration(ctx: ShaderContext) {
-    return `${this.name} = ${this.input.reference(ctx)};`
+    return `${this.reference(ctx)} = ${this.input.reference(ctx)};`
   }
 
-  header() {
+  header(_ctx: ShaderContext) {
     return ''
   }
 
   dependsUpon() {
     return [this.input]
+  }
+
+  extensions() {
+    return []
   }
 }
 
@@ -255,6 +285,10 @@ export class DefaultShaderInput implements ShaderValue {
   header() {
     return ''
   }
+
+  extensions() {
+    return []
+  }
 }
 
 export class ShaderAttribute implements ShaderValue {
@@ -275,8 +309,9 @@ export class ShaderAttribute implements ShaderValue {
     return []
   }
 
-  header() {
-    return `attribute ${this.type} ${this.name};`
+  header(ctx: ShaderContext) {
+    const keyword = ctx.version === 300 ? 'in' : 'attribute'
+    return `${keyword} ${this.type} ${this.name};`
   }
 
   typeName(): string {
@@ -285,6 +320,10 @@ export class ShaderAttribute implements ShaderValue {
 
   connectTo(input: Inputtable) {
     return input.attach(this)
+  }
+
+  extensions() {
+    return []
   }
 }
 
@@ -313,8 +352,14 @@ export class ShaderVarying extends Inputtable implements ShaderValue {
     }
   }
 
-  header() {
-    return `varying ${this.type} ${this.name};`
+  header(ctx: ShaderContext) {
+    let keyword: string
+    if (ctx.version === 300) {
+      keyword = ctx.type === 'vert' ? 'out' : 'in'
+    } else {
+      keyword = 'varying'
+    }
+    return `${keyword} ${this.type} ${this.name};`
   }
 
   typeName(): string {
@@ -323,6 +368,10 @@ export class ShaderVarying extends Inputtable implements ShaderValue {
 
   connectTo(input: Inputtable) {
     return input.attach(this)
+  }
+
+  extensions() {
+    return []
   }
 }
 
@@ -352,6 +401,10 @@ export class ShaderUniform implements ShaderValue {
   connectTo(input: Inputtable) {
     return input.attach(this)
   }
+
+  extensions() {
+    return []
+  }
 }
 
 export class ShaderSnippetInstanceOutput implements ShaderValue {
@@ -377,6 +430,10 @@ export class ShaderSnippetInstanceOutput implements ShaderValue {
     return [this.source]
   }
 
+  extensions() {
+    return []
+  }
+
   typeName() {
     if (this.property) {
       return this.source.snippet.outputProperties![this.property]
@@ -390,11 +447,25 @@ export class ShaderSnippetInstanceOutput implements ShaderValue {
   }
 }
 
+class DefaultShaderOutputColor extends DefaultShaderOutput {
+  constructor() {
+    super('vec4', 'gl_FragColor')
+  }
+
+  reference(ctx: ShaderContext) {
+    return ctx.version === 100 ? 'gl_FragColor' : 'color'
+  }
+
+  header(ctx: ShaderContext) {
+    return ctx.version === 100 ? '' : 'out vec4 color;'
+  }
+}
+
 export type Precision = 'lowp' | 'mediump' | 'highp'
 export class ShaderGraph {
   position = new DefaultShaderOutput('vec4', 'gl_Position')
   fragPosition = new DefaultShaderInput('vec4', 'gl_FragPosition')
-  color = new DefaultShaderOutput('vec4', 'gl_FragColor')
+  color = new DefaultShaderOutputColor()
   intPrecision: Precision
   floatPrecision: Precision
   version: 100 | 300
@@ -416,7 +487,16 @@ export class ShaderGraph {
   build() {
     const vert = this.buildShader(this.position, { type: 'vert', version: this.version })
     const frag = this.buildShader(this.color, { type: 'frag', version: this.version })
-    return { vert, frag }
+    const extensions = new Set<string>()
+    for (const group of [vert.nodes, frag.nodes]) {
+      const ctx: ShaderContext = { version: this.version, type: group === vert.nodes ? 'vert' : 'frag' }
+      for (const node of group) {
+        for (const ext of node.extensions(ctx)) {
+          extensions.add(ext)
+        }
+      }
+    }
+    return { vert, frag, extensions }
   }
 
   private buildShader(output: DefaultShaderOutput, ctx: ShaderContext) {
