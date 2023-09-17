@@ -53,7 +53,7 @@ export class ShaderSnippet implements ShaderGraphNode {
     const mainFunctionSignatures = this.globalScope.functions[mainFunctionName]
     const mainFunction = last(Object.values(mainFunctionSignatures))
     this.mainFunctionName = mainFunction.declaration!.prototype.header.name.identifier
-    this.inputs = mainFunction.declaration!.prototype.parameters.map((param) => param.identifier.identifier)
+    this.inputs = mainFunction.declaration!.prototype.parameters?.map((param) => param.identifier.identifier) ?? []
     this.inputTypes = {}
     mainFunction.parameterTypes.forEach((typeName, i) => {
       this.inputTypes[this.inputs[i]] = typeName
@@ -133,11 +133,11 @@ abstract class BaseShaderValue implements ShaderValue {
   }
 
   replaceWith(other: ShaderValue) {
-    for (const connection of other.connections) {
+    for (const connection of this.connections) {
       if (connection instanceof Inputtable) {
-        connection.input = this
-        this.addConnection(connection)
-        other.removeConnection(connection)
+        connection.input = other
+        other.addConnection(connection)
+        this.removeConnection(connection)
       } else {
         throw new Error('Connection is not inputtable')
       }
