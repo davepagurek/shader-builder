@@ -13,6 +13,8 @@ interface ShaderGraphNode {
   header(ctx: ShaderContext): string
   dependsUpon(ctx: ShaderContext): ShaderGraphNode[]
   extensions(ctx: ShaderContext): string[]
+
+  varyingProxy?: ShaderVarying
 }
 
 export class ShaderSnippet implements ShaderGraphNode {
@@ -103,14 +105,68 @@ export class ShaderSnippet implements ShaderGraphNode {
 
 interface ShaderValue extends ShaderGraphNode {
   typeName(): string
+  connections: Set<ShaderValue>
+  addConnection(node: ShaderValue)
+  removeConnection(node: ShaderValue)
+  replaceWith(other: ShaderValue)
+  insertBetween(before: ShaderValue, insert: ShaderValue)
 }
 
-export class ShaderSnippetInstance implements ShaderGraphNode {
+abstract class BaseShaderValue implements ShaderValue {
+  abstract reference(ctx: ShaderContext): string
+  abstract header(ctx: ShaderContext): string
+  abstract declaration(ctx: ShaderContext): string
+  abstract extensions(ctx: ShaderContext): string[]
+  abstract dependsUpon(ctx: ShaderContext): ShaderGraphNode[]
+  abstract typeName(): string
+
+  varyingProxy?: ShaderVarying
+
+  connections = new Set<ShaderValue>()
+
+  addConnection(node: ShaderValue) {
+    this.connections.add(node)
+  }
+
+  removeConnection(node: ShaderValue) {
+    this.connections.delete(node)
+  }
+
+  replaceWith(other: ShaderValue) {
+    for (const connection of other.connections) {
+      if (connection instanceof Inputtable) {
+        connection.input = this
+        this.addConnection(connection)
+        other.removeConnection(connection)
+      } else {
+        throw new Error('Connection is not inputtable')
+      }
+    }
+  }
+
+  insertBetween(before: ShaderValue, insert: ShaderValue) {
+    if (!(before instanceof Inputtable) || !(insert instanceof Inputtable)) {
+      throw new Error('Connection is not inputtable')
+    }
+    console.log(this)
+    console.log(before)
+    if (before.input !== this) {
+      throw new Error('Nodes are not connected')
+    }
+    insert.input = this
+    before.input = insert
+    insert.addConnection(before)
+    this.removeConnection(before)
+  }
+}
+
+export class ShaderSnippetInstance extends BaseShaderValue implements ShaderGraphNode {
   inputs: { [name: string]: ShaderSnippetInstanceInput }
   output: ShaderSnippetInstanceOutput | { [name: string]: ShaderSnippetInstanceOutput }
   id: string
 
   constructor(public snippet: ShaderSnippet) {
+    super()
     this.id = `__${this.snippet.mainFunctionName}_out_${this.snippet.uses++}`
     this.inputs = {}
     for (const input of snippet.inputs) {
@@ -124,6 +180,10 @@ export class ShaderSnippetInstance implements ShaderGraphNode {
     } else {
       this.output = new ShaderSnippetInstanceOutput(this, null)
     }
+  }
+
+  typeName() {
+    return this.snippet.outputType
   }
 
   reference() {
@@ -181,13 +241,21 @@ export class ShaderSnippetInstance implements ShaderGraphNode {
   }
 }
 
-export abstract class Inputtable {
+export abstract class Inputtable extends BaseShaderValue implements ShaderGraphNode {
   _input: ShaderValue | null = null
+
+  constructor() {
+    super()
+  }
+
   get input() {
     if (this._input === null) {
       throw new Error('Input is not connected!')
     }
     return this._input
+  }
+  set input(input: ShaderValue) {
+    this._input = input
   }
 
   abstract typeName(): string
@@ -196,7 +264,11 @@ export abstract class Inputtable {
     if (this.typeName() !== output.typeName()) {
       throw new Error(`Could not connect nodes: output type ${output.typeName()} does not match input type ${this.typeName()}`)
     }
+    if (this._input) {
+      this._input.removeConnection(this)
+    }
     this._input = output
+    output.addConnection(this)
   }
 }
 
@@ -263,8 +335,10 @@ export class DefaultShaderOutput extends Inputtable implements ShaderGraphNode {
   }
 }
 
-export class DefaultShaderInput implements ShaderValue {
-  constructor(public type: string, public name: string) {}
+export class DefaultShaderInput extends BaseShaderValue implements ShaderValue {
+  constructor(public type: string, public name: string) {
+    super()
+  }
 
   reference() {
     return this.name
@@ -291,8 +365,10 @@ export class DefaultShaderInput implements ShaderValue {
   }
 }
 
-export class ShaderAttribute implements ShaderValue {
-  constructor(public type: string, public name: string) {}
+export class ShaderAttribute extends BaseShaderValue implements ShaderValue {
+  constructor(public type: string, public name: string) {
+    super()
+  }
 
   reference(ctx: ShaderContext) {
     if (ctx.type === 'frag') {
@@ -375,8 +451,10 @@ export class ShaderVarying extends Inputtable implements ShaderValue {
   }
 }
 
-export class ShaderUniform implements ShaderValue {
-  constructor(public type: string, public name: string) {}
+export class ShaderUniform extends BaseShaderValue implements ShaderValue {
+  constructor(public type: string, public name: string) {
+    super()
+  }
 
   header() {
     return `uniform ${this.type} ${this.name};`
@@ -407,8 +485,10 @@ export class ShaderUniform implements ShaderValue {
   }
 }
 
-export class ShaderSnippetInstanceOutput implements ShaderValue {
-  constructor(public source: ShaderSnippetInstance, public property: string | null) {}
+export class ShaderSnippetInstanceOutput extends BaseShaderValue implements ShaderValue {
+  constructor(public source: ShaderSnippetInstance, public property: string | null) {
+    super()
+  }
 
   reference() {
     if (this.property === null) {
@@ -485,8 +565,14 @@ export class ShaderGraph {
   }
 
   build() {
-    const vert = this.buildShader(this.position, { type: 'vert', version: this.version })
-    const frag = this.buildShader(this.color, { type: 'frag', version: this.version })
+    const frag = this.buildShader([this.color], { type: 'frag', version: this.version })
+    const vert = this.buildShader(
+      [
+        this.position,
+        ...[...frag.nodes].filter((node) => node instanceof ShaderVarying),
+      ],
+      { type: 'vert', version: this.version },
+    )
     const extensions = new Set<string>()
     for (const group of [vert.nodes, frag.nodes]) {
       const ctx: ShaderContext = { version: this.version, type: group === vert.nodes ? 'vert' : 'frag' }
@@ -499,7 +585,7 @@ export class ShaderGraph {
     return { vert, frag, extensions }
   }
 
-  private buildShader(output: DefaultShaderOutput, ctx: ShaderContext) {
+  private buildShader(roots: ShaderGraphNode[], ctx: ShaderContext) {
     const nodes = new Set<ShaderGraphNode>()
     const orderedNodes: ShaderGraphNode[] = []
     const mainSource: string[] = []
@@ -513,10 +599,20 @@ export class ShaderGraph {
       nodes.add(node)
       orderedNodes.unshift(node)
       for (const dependency of node.dependsUpon(ctx)) {
-        processNode(dependency)
+        if (ctx.type === 'frag' && dependency instanceof ShaderAttribute) {
+          if (!dependency.varyingProxy) {
+            dependency.varyingProxy = new ShaderVarying(dependency.type, `${dependency.name}_varying_proxy`)
+          }
+          (dependency as ShaderValue).insertBetween(node as ShaderValue, dependency.varyingProxy)
+          processNode(dependency.varyingProxy)
+        } else {
+          processNode(dependency)
+        }
       }
     }
-    processNode(output)
+    for (const root of roots) {
+      processNode(root)
+    }
 
     for (const node of orderedNodes) {
       const header = node.header(ctx)

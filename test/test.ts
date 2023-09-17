@@ -21,9 +21,7 @@ p5Inputs.mvMatrix.connectTo(applyCamera.inputs.mvMatrix)
 p5Inputs.projMatrix.connectTo(applyCamera.inputs.projMatrix)
 applyCamera.connectTo(graph.position)
 
-const varyingColor = new ShaderVarying('vec4', 'vVertexColor')
-p5Inputs.vertexColor.connectTo(varyingColor)
-varyingColor.connectTo(graph.color)
+p5Inputs.vertexColor.connectTo(graph.color)
 
 const { vert, frag } = graph.build()
 console.log(vert)
